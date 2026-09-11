@@ -51,6 +51,8 @@ Trong SePay, tạo webhook trỏ tới `https://<ten-mien>/api/webhooks/sepay`, 
 
 Vai trò quản trị được xác định bằng email trong bảng `finan_admins`. Người dùng mới sẽ thấy hướng dẫn ba bước để liên kết ngân hàng với SePay; trạng thái hoàn tất được lưu trong `finan_user_profiles` sau khi token đã được server xác minh thành công.
 
+Trong Supabase **Authentication → URL Configuration**, đặt **Site URL** thành URL production và thêm `https://<ten-mien>/auth/callback` vào **Redirect URLs**. Mẫu email xác nhận tùy chỉnh phải dùng `{{ .ConfirmationURL }}` hoặc `{{ .RedirectTo }}` để không trả người dùng về localhost.
+
 ## Kiểm tra
 
 ```bash

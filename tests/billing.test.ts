@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import test from "node:test";
 import { buildQrUrl, parseSePayWebhook, publicOrder, verifySePaySignature } from "../lib/billing";
-import { safeSameOriginRedirect } from "../lib/redirect";
+import { resolveAppOrigin, safeSameOriginRedirect } from "../lib/redirect";
 
 test("verifies a fresh SePay HMAC and rejects tampering/replay", () => {
   process.env.SEPAY_WEBHOOK_SECRET = "test-webhook-secret-with-enough-entropy";
@@ -44,4 +44,11 @@ test("keeps auth redirects on the application origin", () => {
   assert.equal(safeSameOriginRedirect(requestUrl, "/#plans").href, "https://finan.example/#plans");
   assert.equal(safeSameOriginRedirect(requestUrl, "/\\evil.example").href, "https://finan.example/");
   assert.equal(safeSameOriginRedirect(requestUrl, "https://evil.example").href, "https://finan.example/");
+});
+
+test("prefers the canonical deployment origin for auth emails", () => {
+  const requestUrl = new URL("http://localhost:3000/api/auth/signup");
+  assert.equal(resolveAppOrigin(requestUrl, { appUrl: "https://finan.example/path" }), "https://finan.example");
+  assert.equal(resolveAppOrigin(requestUrl, { productionUrl: "finan-team.vercel.app" }), "https://finan-team.vercel.app");
+  assert.equal(resolveAppOrigin(requestUrl, { appUrl: "javascript:alert(1)" }), "http://localhost:3000");
 });
