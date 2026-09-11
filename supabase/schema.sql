@@ -51,6 +51,20 @@ create table if not exists public.finan_plans (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.finan_admins (
+  email text primary key check (email = lower(email) and char_length(email) between 3 and 254),
+  display_name text not null default 'Quản trị viên',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.finan_user_profiles (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  onboarding_completed boolean not null default false,
+  onboarding_completed_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.finan_subscriptions (
   user_id uuid primary key references auth.users(id) on delete cascade,
   plan_id text not null references public.finan_plans(id),
@@ -123,6 +137,8 @@ create table if not exists public.finan_rate_limits (
 alter table public.finan_app_settings enable row level security;
 alter table public.finan_navigation_items enable row level security;
 alter table public.finan_plans enable row level security;
+alter table public.finan_admins enable row level security;
+alter table public.finan_user_profiles enable row level security;
 alter table public.finan_subscriptions enable row level security;
 alter table public.finan_connections enable row level security;
 alter table public.finan_orders enable row level security;
@@ -135,6 +151,12 @@ drop policy if exists "finan public navigation" on public.finan_navigation_items
 create policy "finan public navigation" on public.finan_navigation_items for select to anon, authenticated using (active);
 drop policy if exists "finan public plans" on public.finan_plans;
 create policy "finan public plans" on public.finan_plans for select to anon, authenticated using (active);
+drop policy if exists "finan admin reads own role" on public.finan_admins;
+create policy "finan admin reads own role" on public.finan_admins for select to authenticated using (email = lower(coalesce((select auth.jwt() ->> 'email'), '')));
+drop policy if exists "finan own profile select" on public.finan_user_profiles;
+create policy "finan own profile select" on public.finan_user_profiles for select to authenticated using ((select auth.uid()) = user_id);
+drop policy if exists "finan own profile update" on public.finan_user_profiles;
+create policy "finan own profile update" on public.finan_user_profiles for update to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 drop policy if exists "finan own subscription" on public.finan_subscriptions;
 create policy "finan own subscription" on public.finan_subscriptions for select to authenticated using ((select auth.uid()) = user_id);
 drop policy if exists "finan own orders" on public.finan_orders;
@@ -146,11 +168,17 @@ create policy "finan deny direct payment events" on public.finan_payment_events 
 drop policy if exists "finan deny direct rate limits" on public.finan_rate_limits;
 create policy "finan deny direct rate limits" on public.finan_rate_limits for all to anon, authenticated using (false) with check (false);
 
-revoke all on public.finan_app_settings, public.finan_navigation_items, public.finan_plans,
+revoke all on public.finan_app_settings, public.finan_navigation_items, public.finan_plans, public.finan_admins, public.finan_user_profiles,
   public.finan_subscriptions, public.finan_connections, public.finan_orders,
   public.finan_payment_events, public.finan_rate_limits from anon, authenticated;
 grant select on public.finan_app_settings, public.finan_navigation_items, public.finan_plans to anon, authenticated;
+grant select on public.finan_admins to authenticated;
+grant select, update on public.finan_user_profiles to authenticated;
 grant select on public.finan_subscriptions, public.finan_orders to authenticated;
+
+insert into public.finan_admins (email, display_name)
+values ('vuthien616@gmail.com', 'Vũ Thiên')
+on conflict (email) do update set display_name = excluded.display_name;
 
 insert into public.finan_app_settings (
   id, brand_name, workspace_name, guest_workspace_label, member_workspace_label,
@@ -239,6 +267,9 @@ begin
   insert into public.finan_connections(user_id, encrypted_token, mode, bank_count)
   values (p_user_id, p_encrypted_token, p_mode, p_bank_count)
   on conflict (user_id) do update set encrypted_token = excluded.encrypted_token, mode = excluded.mode, bank_count = excluded.bank_count, updated_at = now();
+  insert into public.finan_user_profiles(user_id, onboarding_completed, onboarding_completed_at, updated_at)
+  values (p_user_id, true, now(), now())
+  on conflict (user_id) do update set onboarding_completed = true, onboarding_completed_at = coalesce(public.finan_user_profiles.onboarding_completed_at, now()), updated_at = now();
   return jsonb_build_object('connected', true, 'mode', p_mode, 'bankCount', p_bank_count);
 end;
 $$;
@@ -334,6 +365,7 @@ grant execute on function public.finan_process_payment(text,bigint,text,text,tex
 create or replace function private.finan_handle_new_user()
 returns trigger language plpgsql security definer set search_path = '' as $$
 begin
+  insert into public.finan_user_profiles(user_id) values (new.id) on conflict (user_id) do nothing;
   insert into public.finan_subscriptions(user_id, plan_id, status, ends_at)
   values (new.id, 'starter', 'active', null) on conflict (user_id) do nothing;
   return new;
@@ -346,3 +378,11 @@ create trigger finan_on_auth_user_created after insert on auth.users for each ro
 insert into public.finan_subscriptions(user_id, plan_id, status, ends_at)
 select id, 'starter', 'active', null from auth.users
 on conflict (user_id) do nothing;
+
+insert into public.finan_user_profiles(user_id, onboarding_completed, onboarding_completed_at)
+select u.id, (c.user_id is not null), case when c.user_id is not null then now() else null end
+from auth.users u left join public.finan_connections c on c.user_id = u.id
+on conflict (user_id) do update set
+  onboarding_completed = public.finan_user_profiles.onboarding_completed or excluded.onboarding_completed,
+  onboarding_completed_at = coalesce(public.finan_user_profiles.onboarding_completed_at, excluded.onboarding_completed_at),
+  updated_at = now();

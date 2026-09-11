@@ -47,6 +47,10 @@ Trong SePay, tạo webhook trỏ tới `https://<ten-mien>/api/webhooks/sepay`, 
 
 Ứng dụng chỉ gọi `GET /bank-accounts` và `GET /transactions`, nhưng API Access Token thô vẫn mang quyền do SePay cấp. Nên tạo token riêng cho Finan, không dùng lại ở nơi khác, luân chuyển định kỳ và thu hồi ngay nếu nghi lộ.
 
+## Tài khoản và hướng dẫn ban đầu
+
+Vai trò quản trị được xác định bằng email trong bảng `finan_admins`. Người dùng mới sẽ thấy hướng dẫn ba bước để liên kết ngân hàng với SePay; trạng thái hoàn tất được lưu trong `finan_user_profiles` sau khi token đã được server xác minh thành công.
+
 ## Kiểm tra
 
 ```bash
