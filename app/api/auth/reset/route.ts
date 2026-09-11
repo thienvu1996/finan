@@ -12,7 +12,12 @@ export async function POST(request: Request) {
     if (!parsed.success) throw new HttpError(400, "Email chưa hợp lệ.", "INVALID_EMAIL");
     const appUrl = resolveAppOrigin(new URL(request.url));
     const supabase = await createClient();
-    await supabase.auth.resetPasswordForEmail(parsed.data.email, { redirectTo: new URL("/auth/callback?next=/auth/update-password", appUrl).toString() });
+    const { error } = await supabase.auth.resetPasswordForEmail(parsed.data.email, { redirectTo: new URL("/auth/callback?next=/auth/update-password", appUrl).toString() });
+    if (error) {
+      console.error("[auth:reset] Supabase rejected the email request", { code: error.code, status: error.status });
+      if (error.status === 429) throw new HttpError(429, "Vui lòng đợi một phút trước khi gửi lại email.", "RESET_RATE_LIMITED");
+      throw new HttpError(503, "Chưa thể gửi email đặt lại mật khẩu. Vui lòng thử lại sau.", "RESET_EMAIL_FAILED");
+    }
     return Response.json({ success: true, message: "Nếu email tồn tại, bạn sẽ nhận được hướng dẫn đặt lại mật khẩu." }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return jsonError(error); }
 }

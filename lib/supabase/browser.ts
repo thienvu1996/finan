@@ -5,7 +5,7 @@ let browserClient: ReturnType<typeof createBrowserClient> | undefined;
 export function createClient() {
   if (!browserClient) {
     const { url, key } = publicSupabaseEnv();
-    browserClient = createBrowserClient(url, key);
+    browserClient = createBrowserClient(url, key, { auth: { detectSessionInUrl: false } });
   }
   return browserClient;
 }

@@ -13,7 +13,11 @@ export async function POST(request: Request) {
     const appUrl = resolveAppOrigin(new URL(request.url));
     const supabase = await createClient();
     const { data, error } = await supabase.auth.signUp({ ...parsed.data, options: { emailRedirectTo: new URL("/auth/callback", appUrl).toString() } });
-    if (error) throw new HttpError(400, "Chưa thể tạo tài khoản. Email có thể đã được sử dụng.", "SIGNUP_FAILED");
+    if (error) {
+      console.error("[auth:signup] Supabase rejected the request", { code: error.code, status: error.status });
+      if (error.status === 429) throw new HttpError(429, "Vui lòng đợi một phút trước khi đăng ký lại.", "SIGNUP_RATE_LIMITED");
+      throw new HttpError(400, "Chưa thể tạo tài khoản. Email có thể đã được sử dụng.", "SIGNUP_FAILED");
+    }
     return Response.json({ user: data.user ? { email: data.user.email } : null, requiresEmailConfirmation: !data.session }, { status: 201, headers: { "Cache-Control": "no-store" } });
   } catch (error) { return jsonError(error); }
 }

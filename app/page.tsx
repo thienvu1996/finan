@@ -1,4 +1,5 @@
 import Dashboard from "@/components/finance/dashboard";
+import AuthHashHandler from "@/components/finance/auth-hash-handler";
 import { getAppConfig } from "@/lib/app-config";
 import { redirect } from "next/navigation";
 
@@ -26,5 +27,5 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
   }
   const config = await getAppConfig().catch(() => null);
   if (!config) return <main className="configuration-error"><h1>Finan chưa sẵn sàng</h1><p>Vui lòng kiểm tra cấu hình Supabase của bản triển khai.</p></main>;
-  return <Dashboard initialConfig={config} />;
+  return <><AuthHashHandler /><Dashboard initialConfig={config} /></>;
 }
