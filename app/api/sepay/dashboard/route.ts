@@ -2,12 +2,25 @@ import { requireUser } from "@/lib/auth";
 import { enforceRateLimit, HttpError, jsonError } from "@/lib/security";
 import { decryptToken, getBankAccounts, getTransactions, type SePayMode } from "@/lib/sepay";
 import { activeSubscription } from "@/lib/subscription";
+import type { Transaction } from "@/lib/finance";
+
+function monthBounds(month: string) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new HttpError(400, "Tháng không hợp lệ.", "INVALID_MONTH");
+  const [year, value] = month.split("-").map(Number);
+  const nextYear = value === 12 ? year + 1 : year;
+  const nextMonth = value === 12 ? 1 : value + 1;
+  return {
+    from: `${month}-01T00:00:00+07:00`,
+    to: `${nextYear}-${String(nextMonth).padStart(2, "0")}-01T00:00:00+07:00`,
+  };
+}
 
 export async function GET(request: Request) {
   try {
     const { user, supabase } = await requireUser();
     await enforceRateLimit(user.id, "sepay_sync", 12, 60);
     const month = new URL(request.url).searchParams.get("month") || "";
+    const bounds = monthBounds(month);
     if (!process.env.INTERNAL_RPC_SECRET) throw new HttpError(503, "Máy chủ chưa hoàn tất cấu hình bảo mật.", "SERVER_NOT_CONFIGURED");
     const { data, error } = await supabase.rpc("finan_get_connection", { p_user_id: user.id, p_internal_secret: process.env.INTERNAL_RPC_SECRET });
     const connection = Array.isArray(data) ? data[0] : null;
@@ -28,8 +41,52 @@ export async function GET(request: Request) {
       allowedAccounts = accounts.slice(0, plan?.max_bank_accounts ?? 1);
     }
 
+    const { error: accountSyncError } = await supabase.rpc("finan_sync_connected_accounts", {
+      p_user_id: user.id,
+      p_accounts: allowedAccounts,
+      p_internal_secret: process.env.INTERNAL_RPC_SECRET,
+    });
+    if (accountSyncError) throw new HttpError(500, "Chưa thể đăng ký tài khoản nhận giao dịch realtime.", "ACCOUNT_SYNC_FAILED");
+
+    const { data: webhookRows, error: webhookError } = await supabase
+      .from("finan_transactions")
+      .select("event_id,gateway,account_number,transfer_type,amount,content,reference_code,transaction_at")
+      .gte("transaction_at", bounds.from)
+      .lt("transaction_at", bounds.to)
+      .order("transaction_at", { ascending: false });
+    if (webhookError) throw new HttpError(500, "Chưa thể đọc giao dịch realtime đã lưu.", "TRANSACTION_READ_FAILED");
+
+    const normalized = (value: string) => value.replace(/\s+/g, "");
+    const accountByNumber = new Map(allowedAccounts.map(account => [normalized(account.account_number), account]));
     const allowedIds = new Set(allowedAccounts.map(account => account.id));
-    const transactions = flow.transactions.filter(item => allowedIds.has(item.bank_account_id));
-    return Response.json({ accounts: allowedAccounts, transactions, total: flow.total, complete: flow.complete, mode: "live", fetchedAt: new Date().toISOString() }, { headers: { "Cache-Control": "private, no-store" } });
+    const merged = new Map<string, Transaction>();
+
+    for (const item of flow.transactions) {
+      if (allowedIds.has(item.bank_account_id)) merged.set(item.id, item);
+    }
+
+    for (const row of webhookRows || []) {
+      const account = accountByNumber.get(normalized(String(row.account_number || "")));
+      if (!account) continue;
+      const id = String(row.event_id);
+      const amount = Number(row.amount) || 0;
+      const type = row.transfer_type === "out" ? "out" : "in";
+      const item: Transaction = {
+        id,
+        transaction_date: String(row.transaction_at),
+        account_number: account.account_number,
+        transfer_type: type,
+        amount_in: type === "in" ? amount : 0,
+        amount_out: type === "out" ? amount : 0,
+        transaction_content: String(row.content || ""),
+        reference_number: String(row.reference_code || ""),
+        bank_brand_name: String(row.gateway || account.bank_short_name),
+        bank_account_id: account.id,
+      };
+      merged.set(id, item);
+    }
+
+    const transactions = Array.from(merged.values()).sort((a, b) => b.transaction_date.localeCompare(a.transaction_date));
+    return Response.json({ accounts: allowedAccounts, transactions, total: Math.max(flow.total, transactions.length), complete: flow.complete, mode: "live", fetchedAt: new Date().toISOString() }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }
