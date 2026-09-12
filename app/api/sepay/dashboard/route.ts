@@ -2,6 +2,7 @@ import { requireUser } from "@/lib/auth";
 import { enforceRateLimit, HttpError, jsonError } from "@/lib/security";
 import { decryptToken, getBankAccounts, getTransactions, type SePayMode } from "@/lib/sepay";
 import { activeSubscription } from "@/lib/subscription";
+import { classifyTransaction, type TransactionCategory } from "@/lib/transaction-classification";
 import type { Transaction } from "@/lib/finance";
 
 function monthBounds(month: string) {
@@ -50,7 +51,7 @@ export async function GET(request: Request) {
 
     const { data: webhookRows, error: webhookError } = await supabase
       .from("finan_transactions")
-      .select("event_id,gateway,account_number,transfer_type,amount,content,reference_code,transaction_at")
+      .select("event_id,gateway,account_number,transfer_type,amount,content,reference_code,transaction_at,category,excluded_from_flow,classification_source")
       .gte("transaction_at", bounds.from)
       .lt("transaction_at", bounds.to)
       .order("transaction_at", { ascending: false });
@@ -62,7 +63,14 @@ export async function GET(request: Request) {
     const merged = new Map<string, Transaction>();
 
     for (const item of flow.transactions) {
-      if (allowedIds.has(item.bank_account_id)) merged.set(item.id, item);
+      if (!allowedIds.has(item.bank_account_id)) continue;
+      const classification = classifyTransaction({
+        transfer_type: item.transfer_type,
+        content: item.transaction_content,
+        reference_code: item.reference_number,
+        gateway: item.bank_brand_name,
+      });
+      merged.set(item.id, { ...item, ...classification, classification_source: "rule" });
     }
 
     for (const row of webhookRows || []) {
@@ -71,6 +79,12 @@ export async function GET(request: Request) {
       const id = String(row.event_id);
       const amount = Number(row.amount) || 0;
       const type = row.transfer_type === "out" ? "out" : "in";
+      const fallback = classifyTransaction({
+        transfer_type: type,
+        content: String(row.content || ""),
+        reference_code: String(row.reference_code || ""),
+        gateway: String(row.gateway || account.bank_short_name),
+      });
       const item: Transaction = {
         id,
         transaction_date: String(row.transaction_at),
@@ -82,6 +96,9 @@ export async function GET(request: Request) {
         reference_number: String(row.reference_code || ""),
         bank_brand_name: String(row.gateway || account.bank_short_name),
         bank_account_id: account.id,
+        category: (String(row.category || fallback.category) as TransactionCategory),
+        excluded_from_flow: typeof row.excluded_from_flow === "boolean" ? row.excluded_from_flow : fallback.excluded_from_flow,
+        classification_source: row.classification_source === "manual" ? "manual" : "rule",
       };
       merged.set(id, item);
     }
