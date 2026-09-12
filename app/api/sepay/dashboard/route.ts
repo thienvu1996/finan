@@ -49,6 +49,20 @@ export async function GET(request: Request) {
     });
     if (accountSyncError) throw new HttpError(500, "Chưa thể đăng ký tài khoản nhận giao dịch realtime.", "ACCOUNT_SYNC_FAILED");
 
+    const { data: savedAccounts, error: savedAccountsError } = await supabase
+      .from("finan_connected_accounts")
+      .select("account_id,manual_balance,balance_updated_at")
+      .eq("user_id", user.id)
+      .eq("active", true);
+    if (savedAccountsError) throw new HttpError(500, "Chưa thể đọc số dư tài khoản đã lưu.", "ACCOUNT_BALANCE_READ_FAILED");
+
+    const savedById = new Map((savedAccounts || []).map(row => [String(row.account_id), row]));
+    allowedAccounts = allowedAccounts.map(account => {
+      const saved = savedById.get(account.id);
+      if (!saved || saved.manual_balance == null) return account;
+      return { ...account, accumulated: Number(saved.manual_balance) || 0 };
+    });
+
     const { data: webhookRows, error: webhookError } = await supabase
       .from("finan_transactions")
       .select("event_id,gateway,account_number,transfer_type,amount,content,reference_code,transaction_at,category,excluded_from_flow,classification_source")
