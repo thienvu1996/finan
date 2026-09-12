@@ -27,7 +27,7 @@ export async function POST(request: Request) {
     const supabase = createPublicClient();
     const { data, error } = await supabase.rpc("finan_ingest_transaction", {
       p_internal_secret: process.env.INTERNAL_RPC_SECRET,
-      p_event_id: event.id,
+      p_event_id: String(event.id),
       p_gateway: event.gateway,
       p_account_number: event.accountNumber,
       p_sub_account: event.subAccount,
