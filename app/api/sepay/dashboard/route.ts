@@ -56,9 +56,9 @@ export async function GET(request: Request) {
       .eq("active", true);
     if (savedAccountsError) throw new HttpError(500, "Chưa thể đọc số dư tài khoản đã lưu.", "ACCOUNT_BALANCE_READ_FAILED");
 
-    // SePay API v2 can return a new transaction before the webhook reaches us.
-    // Persist those new API transactions through the same idempotent ingest RPC so
-    // the manual balance is adjusted exactly once and the realtime watcher sees them.
+    // SePay API v2 uses UUID transaction IDs, while legacy/webhook IDs can be numeric.
+    // Persist both as text through the same idempotent ingest RPC. A transaction-level
+    // dedupe key in Postgres prevents API + webhook delivery from applying balance twice.
     const savedByIdForReconcile = new Map((savedAccounts || []).map(row => [String(row.account_id), row]));
     const allowedIdsForReconcile = new Set(allowedAccounts.map(account => account.id));
     const apiTransactions = [...flow.transactions]
@@ -74,9 +74,9 @@ export async function GET(request: Request) {
       const anchorTime = Date.parse(String(saved.balance_anchor_at));
       if (!Number.isFinite(transactionTime) || !Number.isFinite(anchorTime) || transactionTime <= anchorTime) continue;
 
-      const eventId = Number(item.id);
+      const eventId = String(item.id || "").trim();
       const amount = item.transfer_type === "out" ? item.amount_out : item.amount_in;
-      if (!Number.isSafeInteger(eventId) || eventId <= 0 || !Number.isSafeInteger(amount) || amount <= 0) continue;
+      if (!eventId || eventId.length > 100 || !Number.isSafeInteger(amount) || amount <= 0) continue;
 
       const { error: ingestError } = await supabase.rpc("finan_ingest_transaction", {
         p_internal_secret: process.env.INTERNAL_RPC_SECRET,
