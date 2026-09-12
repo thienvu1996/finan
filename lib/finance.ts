@@ -1,5 +1,7 @@
+import { classifyTransaction, type TransactionCategory } from "@/lib/transaction-classification";
+
 export type BankAccount = { id: string; account_holder_name: string; account_number: string; accumulated: number; bank_short_name: string; label: string; active: number };
-export type Transaction = { id: string; transaction_date: string; account_number: string; transfer_type: "in" | "out"; amount_in: number; amount_out: number; transaction_content: string; reference_number: string; bank_brand_name: string; bank_account_id: string };
+export type Transaction = { id: string; transaction_date: string; account_number: string; transfer_type: "in" | "out"; amount_in: number; amount_out: number; transaction_content: string; reference_number: string; bank_brand_name: string; bank_account_id: string; category?: TransactionCategory; excluded_from_flow?: boolean; classification_source?: "rule" | "manual" };
 export type FinanceData = { accounts: BankAccount[]; transactions: Transaction[]; mode: "demo" | "live"; fetchedAt: string | null; complete: boolean; total: number };
 export const money = (value: number) => new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 }).format(value);
 export const currentMonth = () => { const parts = new Intl.DateTimeFormat("en", { timeZone: "Asia/Ho_Chi_Minh", year: "numeric", month: "2-digit" }).formatToParts(new Date()); return `${parts.find(p => p.type === "year")!.value}-${parts.find(p => p.type === "month")!.value}`; };
@@ -19,12 +21,21 @@ export function demoData(month: string): FinanceData {
     [4, "Thu phí dịch vụ định kỳ", 6400000, "in", 0], [2, "Thanh toán nhà cung cấp", 3200000, "out", 1],
   ];
   const today = Number(new Intl.DateTimeFormat("en-US", { day: "numeric", timeZone: "Asia/Ho_Chi_Minh" }).format(new Date()));
-  const transactions = rows.map(([day, content, amount, type, bank], i) => ({
-    id: `demo-${month}-${i}`, transaction_date: `${month}-${String(month === currentMonth() ? Math.max(1, Math.round(day / 28 * today)) : day).padStart(2, "0")}T${String(9 + i % 8).padStart(2, "0")}:30:00+07:00`,
-    account_number: accounts[bank].account_number, transfer_type: type, amount_in: type === "in" ? amount : 0, amount_out: type === "out" ? amount : 0,
-    transaction_content: content, reference_number: `DEMO${1002400 + i}`, bank_brand_name: accounts[bank].bank_short_name, bank_account_id: accounts[bank].id,
-  })).sort((a, b) => b.transaction_date.localeCompare(a.transaction_date));
+  const transactions = rows.map(([day, content, amount, type, bank], i) => {
+    const classification = classifyTransaction({ transfer_type: type, content, reference_code: `DEMO${1002400 + i}`, gateway: accounts[bank].bank_short_name });
+    return {
+      id: `demo-${month}-${i}`, transaction_date: `${month}-${String(month === currentMonth() ? Math.max(1, Math.round(day / 28 * today)) : day).padStart(2, "0")}T${String(9 + i % 8).padStart(2, "0")}:30:00+07:00`,
+      account_number: accounts[bank].account_number, transfer_type: type, amount_in: type === "in" ? amount : 0, amount_out: type === "out" ? amount : 0,
+      transaction_content: content, reference_number: `DEMO${1002400 + i}`, bank_brand_name: accounts[bank].bank_short_name, bank_account_id: accounts[bank].id,
+      ...classification, classification_source: "rule" as const,
+    };
+  }).sort((a, b) => b.transaction_date.localeCompare(a.transaction_date));
   return { accounts, transactions, mode: "demo", fetchedAt: null, complete: true, total: transactions.length };
 }
-export function summarize(rows: Transaction[]) { const income = rows.reduce((s, t) => s + t.amount_in, 0); const expense = rows.reduce((s, t) => s + t.amount_out, 0); return { income, expense, net: income - expense }; }
+export function summarize(rows: Transaction[]) {
+  const included = rows.filter(t => !t.excluded_from_flow);
+  const income = included.reduce((s, t) => s + t.amount_in, 0);
+  const expense = included.reduce((s, t) => s + t.amount_out, 0);
+  return { income, expense, net: income - expense };
+}
 export function weeklyFlow(rows: Transaction[], month: string) { const days = new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate(); return Array.from({ length: Math.ceil(days / 7) }, (_, i) => ({ name: `${i * 7 + 1}–${Math.min(days, (i + 1) * 7)}`, ...summarize(rows.filter(t => Math.floor((Number(t.transaction_date.slice(8, 10)) - 1) / 7) === i)) })); }
