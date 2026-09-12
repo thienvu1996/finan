@@ -9,12 +9,17 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { currentMonth, demoData, money, summarize, weeklyFlow, type FinanceData, type Transaction } from "@/lib/finance";
+import { createClient as createSupabaseClient } from "@/lib/supabase/browser";
 import type { AppConfig } from "@/lib/app-config";
 import AccountPanel from "./account-panel";
 
 type View = "overview" | "transactions" | "accounts" | "plans";
 const iconMap = { dashboard: LayoutDashboard, activity: Activity, landmark: Landmark, gem: Gem } as const;
 const dateText = (date: string) => new Intl.DateTimeFormat("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(date));
+const monthInVietnam = (date: string) => {
+  const parts = new Intl.DateTimeFormat("en", { timeZone: "Asia/Ho_Chi_Minh", year: "numeric", month: "2-digit" }).formatToParts(new Date(date));
+  return `${parts.find(part => part.type === "year")?.value}-${parts.find(part => part.type === "month")?.value}`;
+};
 
 export default function Dashboard({ initialConfig }: { initialConfig: AppConfig }) {
   const { settings, navigation, plans: planConfig } = initialConfig;
@@ -30,6 +35,52 @@ export default function Dashboard({ initialConfig }: { initialConfig: AppConfig 
     change(); window.addEventListener("hashchange", change);
     return () => window.removeEventListener("hashchange", change);
   }, [navigation]);
+  useEffect(() => {
+    if (!identity || data.mode !== "live") return;
+    const supabase = createSupabaseClient();
+    const channel = supabase.channel("finan-personal-transactions")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "finan_transactions" }, payload => {
+        const row = payload.new as {
+          event_id?: number | string;
+          gateway?: string;
+          account_number?: string;
+          transfer_type?: string;
+          amount?: number | string;
+          content?: string;
+          reference_code?: string;
+          transaction_at?: string;
+        };
+        const transactionDate = String(row.transaction_at || "");
+        if (!transactionDate || monthInVietnam(transactionDate) !== month) return;
+        setData(current => {
+          if (current.mode !== "live") return current;
+          const id = String(row.event_id || "");
+          if (!id || current.transactions.some(item => item.id === id)) return current;
+          const normalize = (value: string) => value.replace(/\s+/g, "");
+          const account = current.accounts.find(item => normalize(item.account_number) === normalize(String(row.account_number || "")));
+          if (!account) return current;
+          const type: "in" | "out" = row.transfer_type === "out" ? "out" : "in";
+          const amount = Math.max(0, Number(row.amount) || 0);
+          const transaction: Transaction = {
+            id,
+            transaction_date: transactionDate,
+            account_number: account.account_number,
+            transfer_type: type,
+            amount_in: type === "in" ? amount : 0,
+            amount_out: type === "out" ? amount : 0,
+            transaction_content: String(row.content || ""),
+            reference_number: String(row.reference_code || ""),
+            bank_brand_name: String(row.gateway || account.bank_short_name),
+            bank_account_id: account.id,
+          };
+          const transactions = [transaction, ...current.transactions].sort((a, b) => b.transaction_date.localeCompare(a.transaction_date));
+          return { ...current, transactions, total: Math.max(current.total, transactions.length), fetchedAt: new Date().toISOString() };
+        });
+        setNotice("Đã nhận giao dịch mới từ SePay.");
+      })
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [identity, data.mode, month]);
   const navigate = (next: View) => { setView(next); window.location.hash = next; setPage(1); };
   const scoped = useMemo(() => data.transactions.filter(t => bank === "all" || t.bank_account_id === bank), [data, bank]);
   const totals = summarize(scoped), chart = weeklyFlow(scoped, month);
@@ -84,6 +135,6 @@ export default function Dashboard({ initialConfig }: { initialConfig: AppConfig 
       <div className="table-footer"><span>{filtered.length ? `${(page - 1) * 6 + 1}–${Math.min(page * 6, filtered.length)} trong ${filtered.length} giao dịch` : "0 giao dịch"}</span><div><Button variant="outline" size="icon" aria-label="Trang trước" disabled={page <= 1} onClick={() => setPage(p => p - 1)}><ChevronLeft size={16} /></Button><span>{page} / {pages}</span><Button variant="outline" size="icon" aria-label="Trang sau" disabled={page >= pages} onClick={() => setPage(p => p + 1)}><ChevronRight size={16} /></Button></div></div></section>}
     <AccountPanel plans={planConfig} plansVisible={view === "plans"} open={connect} onOpenChange={setConnect} onIdentity={setIdentity} onConnected={() => { setConnect(false); void sync(); }} onSignedOut={() => { setData(demoData(month)); setIdentity(null); setBank("all"); setPage(1); setError(""); setNotice(""); }} />
     <footer className="page-footer"><span>{settings.brand_name}<span className="brand-dot">.</span><span> Tài chính trong tầm tay</span></span></footer></main></div>
-    <Dialog open={!!detail} onOpenChange={open => { if (!open) setDetail(null); }}><DialogContent><DialogHeader><DialogTitle>Chi tiết giao dịch</DialogTitle><DialogDescription>{detail?.reference_number}</DialogDescription></DialogHeader>{detail && <><strong className={`detail-amount ${detail.transfer_type === "in" ? "positive" : "negative"}`}>{detail.transfer_type === "in" ? "+" : "−"}{money(detail.amount_in || detail.amount_out)}</strong><dl className="detail-list"><div><dt>Nội dung</dt><dd>{detail.transaction_content}</dd></div><div><dt>Thời gian</dt><dd>{dateText(detail.transaction_date)} (GMT+7)</dd></div><div><dt>Ngân hàng</dt><dd>{detail.bank_brand_name}</dd></div><div><dt>Số tài khoản</dt><dd>{detail.account_number}</dd></div><div><dt>Nguồn</dt><dd>{data.mode === "demo" ? "Dữ liệu mẫu" : "SePay API v2"}</dd></div></dl></>}</DialogContent></Dialog>
+    <Dialog open={!!detail} onOpenChange={open => { if (!open) setDetail(null); }}><DialogContent><DialogHeader><DialogTitle>Chi tiết giao dịch</DialogTitle><DialogDescription>{detail?.reference_number}</DialogDescription></DialogHeader>{detail && <><strong className={`detail-amount ${detail.transfer_type === "in" ? "positive" : "negative"}`}>{detail.transfer_type === "in" ? "+" : "−"}{money(detail.amount_in || detail.amount_out)}</strong><dl className="detail-list"><div><dt>Nội dung</dt><dd>{detail.transaction_content}</dd></div><div><dt>Thời gian</dt><dd>{dateText(detail.transaction_date)} (GMT+7)</dd></div><div><dt>Ngân hàng</dt><dd>{detail.bank_brand_name}</dd></div><div><dt>Số tài khoản</dt><dd>{detail.account_number}</dd></div><div><dt>Nguồn</dt><dd>{data.mode === "demo" ? "Dữ liệu mẫu" : "SePay API v2 / Webhook"}</dd></div></dl></>}</DialogContent></Dialog>
   </div>;
 }
