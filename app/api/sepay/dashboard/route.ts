@@ -49,12 +49,61 @@ export async function GET(request: Request) {
     });
     if (accountSyncError) throw new HttpError(500, "Chưa thể đăng ký tài khoản nhận giao dịch realtime.", "ACCOUNT_SYNC_FAILED");
 
-    const { data: savedAccounts, error: savedAccountsError } = await supabase
+    let { data: savedAccounts, error: savedAccountsError } = await supabase
       .from("finan_connected_accounts")
-      .select("account_id,manual_balance,balance_updated_at")
+      .select("account_id,account_number,manual_balance,balance_anchor_at,balance_updated_at")
       .eq("user_id", user.id)
       .eq("active", true);
     if (savedAccountsError) throw new HttpError(500, "Chưa thể đọc số dư tài khoản đã lưu.", "ACCOUNT_BALANCE_READ_FAILED");
+
+    // SePay API v2 can return a new transaction before the webhook reaches us.
+    // Persist those new API transactions through the same idempotent ingest RPC so
+    // the manual balance is adjusted exactly once and the realtime watcher sees them.
+    const savedByIdForReconcile = new Map((savedAccounts || []).map(row => [String(row.account_id), row]));
+    const allowedIdsForReconcile = new Set(allowedAccounts.map(account => account.id));
+    const apiTransactions = [...flow.transactions]
+      .filter(item => allowedIdsForReconcile.has(item.bank_account_id))
+      .sort((a, b) => a.transaction_date.localeCompare(b.transaction_date));
+
+    let reconciledAny = false;
+    for (const item of apiTransactions) {
+      const saved = savedByIdForReconcile.get(item.bank_account_id);
+      if (!saved || saved.manual_balance == null || !saved.balance_anchor_at) continue;
+
+      const transactionTime = Date.parse(item.transaction_date);
+      const anchorTime = Date.parse(String(saved.balance_anchor_at));
+      if (!Number.isFinite(transactionTime) || !Number.isFinite(anchorTime) || transactionTime <= anchorTime) continue;
+
+      const eventId = Number(item.id);
+      const amount = item.transfer_type === "out" ? item.amount_out : item.amount_in;
+      if (!Number.isSafeInteger(eventId) || eventId <= 0 || !Number.isSafeInteger(amount) || amount <= 0) continue;
+
+      const { error: ingestError } = await supabase.rpc("finan_ingest_transaction", {
+        p_internal_secret: process.env.INTERNAL_RPC_SECRET,
+        p_event_id: eventId,
+        p_gateway: item.bank_brand_name,
+        p_account_number: item.account_number,
+        p_sub_account: "",
+        p_transfer_type: item.transfer_type,
+        p_amount: amount,
+        p_content: item.transaction_content,
+        p_reference_code: item.reference_number,
+        p_transaction_at: item.transaction_date,
+        p_payload_hash: `sepay-api-v2:${item.id}`,
+      });
+      if (ingestError) throw new HttpError(500, "Chưa thể cập nhật số dư từ giao dịch mới.", "BALANCE_RECONCILE_FAILED");
+      reconciledAny = true;
+    }
+
+    if (reconciledAny) {
+      const refreshed = await supabase
+        .from("finan_connected_accounts")
+        .select("account_id,account_number,manual_balance,balance_anchor_at,balance_updated_at")
+        .eq("user_id", user.id)
+        .eq("active", true);
+      if (refreshed.error) throw new HttpError(500, "Chưa thể đọc số dư sau khi cập nhật.", "ACCOUNT_BALANCE_READ_FAILED");
+      savedAccounts = refreshed.data;
+    }
 
     const savedById = new Map((savedAccounts || []).map(row => [String(row.account_id), row]));
     allowedAccounts = allowedAccounts.map(account => {
