@@ -27,6 +27,6 @@ export default async function Home({ searchParams }: { searchParams: SearchParam
     redirect(`/auth/callback?${callback.toString()}`);
   }
   const config = await getAppConfig().catch(() => null);
-  if (!config) return <main className="configuration-error"><h1>Finan chưa sẵn sàng</h1><p>Vui lòng kiểm tra cấu hình Supabase của bản triển khai.</p></main>;
+  if (!config) return <main className="configuration-error"><h1>Hệ thống đang bảo trì</h1><p>Finflow đang được cập nhật. Vui lòng thử lại sau ít phút.</p></main>;
   return <><AuthHashHandler /><RealtimeAutoSync /><Dashboard initialConfig={config} /></>;
 }
