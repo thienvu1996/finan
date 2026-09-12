@@ -46,7 +46,9 @@ async function requestSePay(path: string, token: string, mode: SePayMode, params
         const seconds = Math.min(2, Math.max(1, Number(response.headers.get("retry-after") || 1)));
         await sleep(seconds * 1000); continue;
       }
-      if (response.status === 401) throw new HttpError(400, "Token SePay không hợp lệ hoặc đã hết hạn.", "INVALID_SEPAY_TOKEN");
+      if (response.status === 401) throw new HttpError(400, "Token SePay không hợp lệ hoặc đã hết hạn. Hãy tạo token mới trong SePay rồi kết nối lại.", "INVALID_SEPAY_TOKEN");
+      if (response.status === 403) throw new HttpError(403, "Token SePay chưa có quyền đọc tài khoản hoặc giao dịch.", "SEPAY_PERMISSION_DENIED");
+      if (response.status === 422) throw new HttpError(400, "SePay từ chối yêu cầu đồng bộ. Hãy kiểm tra tài khoản ngân hàng đã liên kết và thử lại.", "SEPAY_INVALID_REQUEST");
       if (!response.ok) throw new HttpError(502, "SePay tạm thời chưa phản hồi. Vui lòng thử lại.", "SEPAY_UNAVAILABLE");
       const json = await response.json() as { status?: string; data?: unknown[]; meta?: { pagination?: Pagination } };
       if (json.status !== "success" || !Array.isArray(json.data)) throw new HttpError(502, "Dữ liệu SePay trả về không hợp lệ.", "INVALID_SEPAY_RESPONSE");
@@ -78,7 +80,7 @@ function monthRange(month: string) {
   return { from: `${month}-01 00:00:00`, to: `${month}-${String(days).padStart(2, "0")} 23:59:59` };
 }
 
-export async function getTransactions(token: string, mode: SePayMode, month: string, maxPages = 5) {
+export async function getTransactions(token: string, mode: SePayMode, month: string, maxPages = 10) {
   const range = monthRange(month);
   const transactions: Transaction[] = [];
   let total = 0, complete = true;
