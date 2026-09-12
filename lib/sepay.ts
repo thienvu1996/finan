@@ -1,5 +1,5 @@
 import "server-only";
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import { HttpError } from "@/lib/security";
 import type { BankAccount, Transaction } from "@/lib/finance";
 
@@ -7,11 +7,16 @@ export type SePayMode = "live" | "sandbox";
 type Pagination = { total: number; has_more: boolean; current_page: number; last_page: number };
 
 function encryptionKey() {
-  const raw = process.env.SEPAY_TOKEN_ENCRYPTION_KEY;
+  const raw = process.env.SEPAY_TOKEN_ENCRYPTION_KEY?.trim();
   if (!raw) throw new HttpError(503, "Máy chủ chưa cấu hình mã hóa token SePay.", "ENCRYPTION_NOT_CONFIGURED");
-  const key = Buffer.from(raw, "base64url");
-  if (key.byteLength !== 32) throw new HttpError(503, "Khóa mã hóa máy chủ không hợp lệ.", "ENCRYPTION_NOT_CONFIGURED");
-  return key;
+
+  // Preferred format: 32 random bytes encoded as base64url.
+  // For an existing strong secret stored in Vercel in another text format,
+  // deterministically derive the 32-byte AES key instead of rejecting it.
+  const decoded = Buffer.from(raw, "base64url");
+  if (decoded.byteLength === 32) return decoded;
+  if (raw.length < 32) throw new HttpError(503, "Khóa mã hóa máy chủ không hợp lệ.", "ENCRYPTION_NOT_CONFIGURED");
+  return createHash("sha256").update(raw, "utf8").digest();
 }
 
 export function encryptToken(token: string) {
