@@ -22,15 +22,23 @@ export async function POST(request: Request) {
       supabase.from("finan_admins").select("email").eq("email", user.email?.toLowerCase() || "").maybeSingle(),
     ]);
 
+    let allowedAccounts = accounts;
     if (!admin) {
       const planId = activeSubscription(subscription).plan_id;
       const { data: plan } = await supabase.from("finan_plans").select("max_bank_accounts").eq("id", planId).single();
-      if (accounts.length > (plan?.max_bank_accounts ?? 1)) throw new HttpError(403, `Gói hiện tại hỗ trợ tối đa ${plan?.max_bank_accounts ?? 1} tài khoản ngân hàng.`, "PLAN_ACCOUNT_LIMIT");
+      const limit = plan?.max_bank_accounts ?? 1;
+      if (accounts.length > limit) throw new HttpError(403, `Gói hiện tại hỗ trợ tối đa ${limit} tài khoản ngân hàng.`, "PLAN_ACCOUNT_LIMIT");
+      allowedAccounts = accounts.slice(0, limit);
     }
 
-    const { data, error } = await supabase.rpc("finan_upsert_connection", { p_user_id: user.id, p_encrypted_token: encryptToken(parsed.data.token), p_mode: parsed.data.mode, p_bank_count: accounts.length, p_internal_secret: internalSecret() });
+    const secret = internalSecret();
+    const { data, error } = await supabase.rpc("finan_upsert_connection", { p_user_id: user.id, p_encrypted_token: encryptToken(parsed.data.token), p_mode: parsed.data.mode, p_bank_count: allowedAccounts.length, p_internal_secret: secret });
     if (error) throw new HttpError(500, "Chưa thể lưu kết nối SePay.", "CONNECTION_SAVE_FAILED");
-    return Response.json({ ...data, bankCount: accounts.length }, { status: 201, headers: { "Cache-Control": "private, no-store" } });
+
+    const { error: accountError } = await supabase.rpc("finan_sync_connected_accounts", { p_user_id: user.id, p_accounts: allowedAccounts, p_internal_secret: secret });
+    if (accountError) throw new HttpError(500, "Đã kết nối SePay nhưng chưa thể đăng ký tài khoản nhận webhook.", "ACCOUNT_SYNC_FAILED");
+
+    return Response.json({ ...data, bankCount: allowedAccounts.length }, { status: 201, headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }
 
@@ -38,8 +46,10 @@ export async function DELETE(request: Request) {
   try {
     assertSameOrigin(request);
     const { user, supabase } = await requireUser();
-    const { error } = await supabase.rpc("finan_delete_connection", { p_user_id: user.id, p_internal_secret: internalSecret() });
-    if (error) throw new HttpError(500, "Chưa thể ngắt kết nối SePay.", "CONNECTION_DELETE_FAILED");
+    const secret = internalSecret();
+    await supabase.rpc("finan_sync_connected_accounts", { p_user_id: user.id, p_accounts: [], p_internal_secret: secret });
+    const { error } = await supabase.rpc("finan_delete_connection", { p_user_id: user.id, p_internal_secret: secret });
+    if (error) throw new HttpError(500, "Chưa thể ngắt kết nối.", "CONNECTION_DELETE_FAILED");
     return Response.json({ success: true }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return jsonError(error); }
 }
