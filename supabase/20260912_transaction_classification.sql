@@ -42,61 +42,60 @@ set search_path = ''
 as $$
 declare
   v_text text := lower(concat_ws(' ', coalesce(p_content,''), coalesce(p_reference_code,''), coalesce(p_gateway,'')));
+  v_category text;
+  v_excluded boolean := false;
 begin
   if v_text ~ '(chuyển tiền.*(nội bộ|giữa.*tài khoản)|chuyen tien.*(noi bo|giua.*tai khoan)|internal transfer|own account)' then
-    return query select 'transfer_internal'::text, true;
-    return;
-  end if;
-  if v_text ~ '(góp vốn|gop von|rút vốn|rut von|capital contribution|capital withdrawal)' then
-    return query select 'capital'::text, true;
-    return;
-  end if;
-  if v_text ~ '(khoản vay|khoan vay|vay vốn|vay von|trả nợ|tra no|repay loan|loan)' then
-    return query select 'loan'::text, true;
-    return;
-  end if;
-  if v_text ~ '(hoàn tiền|hoan tien|refund|reversal)' then
-    return query select 'refund'::text, true;
-    return;
-  end if;
-
-  if p_transfer_type = 'in' then
+    v_category := 'transfer_internal';
+    v_excluded := true;
+  elsif v_text ~ '(góp vốn|gop von|rút vốn|rut von|capital contribution|capital withdrawal)' then
+    v_category := 'capital';
+    v_excluded := true;
+  elsif v_text ~ '(khoản vay|khoan vay|vay vốn|vay von|trả nợ|tra no|repay loan|loan)' then
+    v_category := 'loan';
+    v_excluded := true;
+  elsif v_text ~ '(hoàn tiền|hoan tien|refund|reversal)' then
+    v_category := 'refund';
+    v_excluded := true;
+  elsif p_transfer_type = 'in' then
     if v_text ~ '(lương|luong|salary|payroll)' then
-      return query select 'income_salary'::text, false;
+      v_category := 'income_salary';
     elsif v_text ~ '(đơn hàng|don hang|bán hàng|ban hang|sale|order)' then
-      return query select 'income_sales'::text, false;
+      v_category := 'income_sales';
     elsif v_text ~ '(dịch vụ|dich vu|tư vấn|tu van|project|service|consult)' then
-      return query select 'income_service'::text, false;
+      v_category := 'income_service';
     else
-      return query select 'income_other'::text, false;
+      v_category := 'income_other';
+    end if;
+  else
+    if v_text ~ '(nhà cung cấp|nha cung cap|nhập hàng|nhap hang|giá vốn|gia von|supplier|inventory)' then
+      v_category := 'expense_cogs';
+    elsif v_text ~ '(lương|luong|salary|payroll)' then
+      v_category := 'expense_salary';
+    elsif v_text ~ '(quảng cáo|quang cao|facebook ads|google ads|tiktok ads|marketing)' then
+      v_category := 'expense_marketing';
+    elsif v_text ~ '(thuê nhà|thue nha|thuê văn phòng|thue van phong|rent)' then
+      v_category := 'expense_rent';
+    elsif v_text ~ '(điện|dien|nước|nuoc|internet|điện thoại|dien thoai|utility|utilities)' then
+      v_category := 'expense_utilities';
+    elsif v_text ~ '(vận chuyển|van chuyen|giao hàng|giao hang|shipping|shipper|delivery)' then
+      v_category := 'expense_shipping';
+    elsif v_text ~ '(phí ngân hàng|phi ngan hang|phí giao dịch|phi giao dich|bank fee|transaction fee)' then
+      v_category := 'expense_fee';
+    elsif v_text ~ '(thuế|thue|tax|lệ phí|le phi)' then
+      v_category := 'expense_tax';
+    elsif v_text ~ '(grabfood|shopeefood|ăn uống|an uong|cơm|com |food|restaurant|cafe|coffee)' then
+      v_category := 'expense_food';
+    elsif v_text ~ '(grab|be |xanh sm|taxi|xăng|xang|parking|gửi xe|gui xe)' then
+      v_category := 'expense_transport';
+    elsif v_text ~ '(shopee|lazada|tiki|mua sắm|mua sam|shopping)' then
+      v_category := 'expense_shopping';
+    else
+      v_category := 'expense_other';
     end if;
   end if;
 
-  if v_text ~ '(nhà cung cấp|nha cung cap|nhập hàng|nhap hang|giá vốn|gia von|supplier|inventory)' then
-    return query select 'expense_cogs'::text, false;
-  elsif v_text ~ '(lương|luong|salary|payroll)' then
-    return query select 'expense_salary'::text, false;
-  elsif v_text ~ '(quảng cáo|quang cao|facebook ads|google ads|tiktok ads|marketing)' then
-    return query select 'expense_marketing'::text, false;
-  elsif v_text ~ '(thuê nhà|thue nha|thuê văn phòng|thue van phong|rent)' then
-    return query select 'expense_rent'::text, false;
-  elsif v_text ~ '(điện|dien|nước|nuoc|internet|điện thoại|dien thoai|utility|utilities)' then
-    return query select 'expense_utilities'::text, false;
-  elsif v_text ~ '(vận chuyển|van chuyen|giao hàng|giao hang|shipping|shipper|delivery)' then
-    return query select 'expense_shipping'::text, false;
-  elsif v_text ~ '(phí ngân hàng|phi ngan hang|phí giao dịch|phi giao dich|bank fee|transaction fee)' then
-    return query select 'expense_fee'::text, false;
-  elsif v_text ~ '(thuế|thue|tax|lệ phí|le phi)' then
-    return query select 'expense_tax'::text, false;
-  elsif v_text ~ '(grabfood|shopeefood|ăn uống|an uong|cơm|com |food|restaurant|cafe|coffee)' then
-    return query select 'expense_food'::text, false;
-  elsif v_text ~ '(grab|be |xanh sm|taxi|xăng|xang|parking|gửi xe|gui xe)' then
-    return query select 'expense_transport'::text, false;
-  elsif v_text ~ '(shopee|lazada|tiki|mua sắm|mua sam|shopping)' then
-    return query select 'expense_shopping'::text, false;
-  else
-    return query select 'expense_other'::text, false;
-  end if;
+  return query select v_category, v_excluded;
 end;
 $$;
 
