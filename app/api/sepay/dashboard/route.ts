@@ -16,6 +16,25 @@ function monthBounds(month: string) {
   };
 }
 
+type UserRule = { transfer_type: "in" | "out"; keyword: string; category: TransactionCategory; excluded_from_flow: boolean };
+type Override = { transaction_id: string; category: TransactionCategory; excluded_from_flow: boolean };
+
+function applyUserClassification(
+  transactionId: string,
+  transferType: "in" | "out",
+  text: string,
+  fallback: { category: TransactionCategory; excluded_from_flow: boolean },
+  rules: UserRule[],
+  overrides: Map<string, Override>,
+) {
+  const override = overrides.get(transactionId);
+  if (override) return { category: override.category, excluded_from_flow: override.excluded_from_flow, classification_source: "manual" as const };
+  const normalized = text.normalize("NFKC").toLocaleLowerCase("vi").replace(/\s+/g, " ");
+  const rule = rules.find(item => item.transfer_type === transferType && normalized.includes(item.keyword));
+  if (rule) return { category: rule.category, excluded_from_flow: rule.excluded_from_flow, classification_source: "rule" as const };
+  return { ...fallback, classification_source: "rule" as const };
+}
+
 export async function GET(request: Request) {
   try {
     const { user, supabase } = await requireUser();
@@ -56,9 +75,6 @@ export async function GET(request: Request) {
       .eq("active", true);
     if (savedAccountsError) throw new HttpError(500, "Chưa thể đọc số dư tài khoản đã lưu.", "ACCOUNT_BALANCE_READ_FAILED");
 
-    // SePay API v2 uses UUID transaction IDs, while legacy/webhook IDs can be numeric.
-    // Persist both as text through the same idempotent ingest RPC. A transaction-level
-    // dedupe key in Postgres prevents API + webhook delivery from applying balance twice.
     const savedByIdForReconcile = new Map((savedAccounts || []).map(row => [String(row.account_id), row]));
     const allowedIdsForReconcile = new Set(allowedAccounts.map(account => account.id));
     const apiTransactions = [...flow.transactions]
@@ -69,11 +85,9 @@ export async function GET(request: Request) {
     for (const item of apiTransactions) {
       const saved = savedByIdForReconcile.get(item.bank_account_id);
       if (!saved || saved.manual_balance == null || !saved.balance_anchor_at) continue;
-
       const transactionTime = Date.parse(item.transaction_date);
       const anchorTime = Date.parse(String(saved.balance_anchor_at));
       if (!Number.isFinite(transactionTime) || !Number.isFinite(anchorTime) || transactionTime <= anchorTime) continue;
-
       const eventId = String(item.id || "").trim();
       const amount = item.transfer_type === "out" ? item.amount_out : item.amount_in;
       if (!eventId || eventId.length > 100 || !Number.isSafeInteger(amount) || amount <= 0) continue;
@@ -112,13 +126,27 @@ export async function GET(request: Request) {
       return { ...account, accumulated: Number(saved.manual_balance) || 0 };
     });
 
-    const { data: webhookRows, error: webhookError } = await supabase
-      .from("finan_transactions")
-      .select("event_id,gateway,account_number,transfer_type,amount,content,reference_code,transaction_at,category,excluded_from_flow,classification_source")
-      .gte("transaction_at", bounds.from)
-      .lt("transaction_at", bounds.to)
-      .order("transaction_at", { ascending: false });
-    if (webhookError) throw new HttpError(500, "Chưa thể đọc giao dịch realtime đã lưu.", "TRANSACTION_READ_FAILED");
+    const [webhookResult, rulesResult, overridesResult] = await Promise.all([
+      supabase.from("finan_transactions")
+        .select("event_id,gateway,account_number,transfer_type,amount,content,reference_code,transaction_at,category,excluded_from_flow,classification_source")
+        .gte("transaction_at", bounds.from)
+        .lt("transaction_at", bounds.to)
+        .order("transaction_at", { ascending: false }),
+      supabase.from("finan_category_rules")
+        .select("transfer_type,keyword,category,excluded_from_flow")
+        .eq("user_id", user.id)
+        .eq("active", true),
+      supabase.from("finan_transaction_category_overrides")
+        .select("transaction_id,category,excluded_from_flow")
+        .eq("user_id", user.id),
+    ]);
+    if (webhookResult.error) throw new HttpError(500, "Chưa thể đọc giao dịch realtime đã lưu.", "TRANSACTION_READ_FAILED");
+    if (rulesResult.error || overridesResult.error) throw new HttpError(500, "Chưa thể đọc quy tắc phân loại.", "CATEGORY_RULE_READ_FAILED");
+
+    const userRules = ((rulesResult.data || []) as UserRule[])
+      .map(rule => ({ ...rule, keyword: String(rule.keyword || "").normalize("NFKC").toLocaleLowerCase("vi") }))
+      .sort((a, b) => b.keyword.length - a.keyword.length);
+    const overrides = new Map(((overridesResult.data || []) as Override[]).map(row => [String(row.transaction_id), row]));
 
     const normalized = (value: string) => value.replace(/\s+/g, "");
     const accountByNumber = new Map(allowedAccounts.map(account => [normalized(account.account_number), account]));
@@ -127,27 +155,47 @@ export async function GET(request: Request) {
 
     for (const item of flow.transactions) {
       if (!allowedIds.has(item.bank_account_id)) continue;
-      const classification = classifyTransaction({
+      const fallback = classifyTransaction({
         transfer_type: item.transfer_type,
         content: item.transaction_content,
         reference_code: item.reference_number,
         gateway: item.bank_brand_name,
       });
-      merged.set(item.id, { ...item, ...classification, classification_source: "rule" });
+      const classification = applyUserClassification(
+        String(item.id),
+        item.transfer_type,
+        `${item.transaction_content} ${item.reference_number} ${item.bank_brand_name}`,
+        fallback,
+        userRules,
+        overrides,
+      );
+      merged.set(item.id, { ...item, ...classification });
     }
 
-    for (const row of webhookRows || []) {
+    for (const row of webhookResult.data || []) {
       const account = accountByNumber.get(normalized(String(row.account_number || "")));
       if (!account) continue;
       const id = String(row.event_id);
       const amount = Number(row.amount) || 0;
       const type = row.transfer_type === "out" ? "out" : "in";
-      const fallback = classifyTransaction({
+      const fallbackRule = classifyTransaction({
         transfer_type: type,
         content: String(row.content || ""),
         reference_code: String(row.reference_code || ""),
         gateway: String(row.gateway || account.bank_short_name),
       });
+      const fallback = {
+        category: (String(row.category || fallbackRule.category) as TransactionCategory),
+        excluded_from_flow: typeof row.excluded_from_flow === "boolean" ? row.excluded_from_flow : fallbackRule.excluded_from_flow,
+      };
+      const classification = applyUserClassification(
+        id,
+        type,
+        `${String(row.content || "")} ${String(row.reference_code || "")} ${String(row.gateway || account.bank_short_name)}`,
+        fallback,
+        userRules,
+        overrides,
+      );
       const item: Transaction = {
         id,
         transaction_date: String(row.transaction_at),
@@ -159,9 +207,7 @@ export async function GET(request: Request) {
         reference_number: String(row.reference_code || ""),
         bank_brand_name: String(row.gateway || account.bank_short_name),
         bank_account_id: account.id,
-        category: (String(row.category || fallback.category) as TransactionCategory),
-        excluded_from_flow: typeof row.excluded_from_flow === "boolean" ? row.excluded_from_flow : fallback.excluded_from_flow,
-        classification_source: row.classification_source === "manual" ? "manual" : "rule",
+        ...classification,
       };
       merged.set(id, item);
     }
